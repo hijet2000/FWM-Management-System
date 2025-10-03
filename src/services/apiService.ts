@@ -1,265 +1,255 @@
+import { User, Site, Role, Permission, Attendee, Booking, Room, AuditLog, DataRequestLog, SystemHealth, SystemServiceStatus, SettingsVersion, TicketType, Registration, DiscountCode, RegistrationStatus } from '../types.ts';
 
-import { AuthenticatedUser, User, Site, Role, Permission, Booking, Room, Attendee } from '../../types.ts';
+const DELAY = 200; // simulate network latency
 
-// --- LocalStorage DB Abstraction ---
+const get = <T>(key: string): T[] => JSON.parse(localStorage.getItem(key) || '[]');
+const set = <T>(key: string, data: T[]): void => localStorage.setItem(key, JSON.stringify(data));
+const uid = () => Math.random().toString(36).substring(2, 9);
 
-class LocalStorageDB {
-    private prefix = 'fwm_';
+const delayed = <T>(data: T): Promise<T> => new Promise(resolve => setTimeout(() => resolve(data), DELAY));
+const delayedError = (message: string): Promise<any> => new Promise((_, reject) => setTimeout(() => reject(new Error(message)), DELAY));
 
-    getItem<T>(key: string): T | null {
-        const item = localStorage.getItem(this.prefix + key);
-        if (!item) return null;
-        // JSON reviver to correctly parse date strings back into Date objects
-        return JSON.parse(item, (k, v) => {
-             if (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}.\d{3}Z$/.test(v)) {
-                return new Date(v);
-            }
-            return v;
-        });
-    }
-
-    setItem<T>(key: string, value: T): void {
-        localStorage.setItem(this.prefix + key, JSON.stringify(value));
-    }
-
-    getCollection<T>(key: string): T[] {
-        return this.getItem<T[]>(key) || [];
-    }
-}
-
-const db = new LocalStorageDB();
-
-// --- Helper Functions ---
-
-const uuid = () => crypto.randomUUID();
-const delay = (ms: number) => new Promise(res => setTimeout(res, ms));
-
-
-// --- Seeding Logic --- (Called from scripts/seed.ts)
-export const seedDatabase = async (seedData: any) => {
-    localStorage.clear();
-
-    // Permissions
-    const permissions = seedData.permissions.map((p: any) => ({ ...p, id: uuid() }));
-    db.setItem('permissions', permissions);
-
-    // Roles and Role-Permission links
-    const roles: Role[] = [];
-    const rolePermissions: any[] = [];
-    seedData.roles.forEach((r: any) => {
-        const roleId = uuid();
-        roles.push({ id: roleId, name: r.name, permissions: [], users: [] });
-        r.permissions.forEach((p: any) => {
-            const perm = permissions.find((perm: any) => perm.action === p.action && perm.resource === p.resource);
-            if(perm) {
-                rolePermissions.push({ roleId, permissionId: perm.id });
+// A helper for deep merging objects, useful for updating nested settings
+const deepMerge = (target: any, source: any) => {
+    const output = { ...target };
+    if (target && typeof target === 'object' && source && typeof source === 'object') {
+        Object.keys(source).forEach(key => {
+            if (source[key] && typeof source[key] === 'object' && key in target) {
+                output[key] = deepMerge(target[key], source[key]);
+            } else {
+                output[key] = source[key];
             }
         });
-    });
-    db.setItem('roles', roles);
-    db.setItem('rolePermissions', rolePermissions);
-
-    // Sites
-    const sites = seedData.sites.map((s: any) => ({ ...s, id: uuid(), createdAt: new Date(), updatedAt: new Date(), campuses: [] }));
-    db.setItem('sites', sites);
-    
-    // Users and User-Role links
-    const users: User[] = [];
-    const userRoles: any[] = [];
-    seedData.users.forEach((u: any) => {
-        const userId = uuid();
-        users.push({
-            id: userId,
-            email: u.email,
-            passwordHash: u.password, // Storing plain text in mock DB
-            firstName: u.firstName,
-            lastName: u.lastName,
-            createdAt: new Date(),
-            updatedAt: new Date(),
-            roles: []
-        });
-        u.roles.forEach((ur: any) => {
-            const role = roles.find(r => r.name === ur.name);
-            const site = sites.find(s => s.name === ur.siteName);
-            if (role) {
-                userRoles.push({ userId, roleId: role.id, siteId: site?.id });
-            }
-        });
-    });
-    db.setItem('users', users);
-    db.setItem('userRoles', userRoles);
-
-    // Attendees
-    const attendees = seedData.attendees.map((a: any) => {
-        const site = sites.find(s => s.name === a.siteName);
-        return {
-            ...a,
-            id: uuid(),
-            siteId: site.id,
-            registrationDate: new Date(),
-        };
-    });
-    db.setItem('attendees', attendees);
-
-    // Rooms
-    const rooms = seedData.rooms.map((r: any) => {
-        const site = sites.find(s => s.name === r.siteName);
-        return {
-            ...r,
-            id: uuid(),
-            siteId: site.id,
-            bookings: [],
-        };
-    });
-    db.setItem('rooms', rooms);
-
-    // Bookings
-    const bookings = seedData.bookings.map((b: any) => {
-        const site = sites.find(s => s.name === b.siteName);
-        const room = rooms.find(r => r.siteId === site.id && r.roomNumber === b.roomNumber);
-        const checkIn = new Date();
-        checkIn.setDate(checkIn.getDate() + b.checkInDaysFromNow);
-        const checkOut = new Date();
-        checkOut.setDate(checkOut.getDate() + b.checkOutDaysFromNow);
-        return {
-            id: uuid(),
-            siteId: site.id,
-            roomId: room.id,
-            guestName: b.guestName,
-            checkIn,
-            checkOut,
-            createdAt: new Date(),
-        };
-    });
-    db.setItem('bookings', bookings);
-
-    db.setItem('fwm_db_seeded', true);
-};
-
-// --- API Service ---
-
-const getAuthenticatedUserFromUser = (user: User): AuthenticatedUser => {
-    const allRoles = db.getCollection<Role>('roles');
-    const allPermissions = db.getCollection<Permission>('permissions');
-    const userRoleLinks = db.getCollection<any>('userRoles').filter(ur => ur.userId === user.id);
-    const rolePermissionLinks = db.getCollection<any>('rolePermissions');
-
-    const hydratedRoles = userRoleLinks.map(link => {
-        const role = allRoles.find(r => r.id === link.roleId);
-        if (!role) return null;
-
-        const permissionsForRole = rolePermissionLinks
-            .filter(rp => rp.roleId === role.id)
-            .map(rp => allPermissions.find(p => p.id === rp.permissionId))
-            .filter(Boolean) as Permission[];
-
-        return {
-            name: role.name,
-            siteId: link.siteId,
-            campusId: link.campusId,
-            permissions: permissionsForRole.map(p => ({ action: p.action, resource: p.resource }))
-        };
-    }).filter(Boolean) as AuthenticatedUser['roles'];
-
-    const { passwordHash, ...safeUser } = user;
-    return { ...safeUser, roles: hydratedRoles };
+    }
+    return output;
 };
 
 
 export const apiService = {
-    async login(email: string, password_plaintext: string): Promise<AuthenticatedUser> {
-        await delay(500);
-        const users = db.getCollection<User>('users');
-        const user = users.find(u => u.email.toLowerCase() === email.toLowerCase());
+  // AUTH
+  async login(email: string, password: string): Promise<User> {
+    const users = get<User>('users');
+    const user = users.find(u => u.email === email);
+    if (user && password === 'password') { // Mock password check
+      return delayed(user);
+    }
+    return delayedError('Invalid credentials');
+  },
 
-        if (!user || user.passwordHash !== password_plaintext) {
-            throw new Error('Invalid email or password');
-        }
+  // USERS, ROLES, PERMISSIONS
+  listUsers: (): Promise<User[]> => delayed(get<User>('users')),
+  listSites: (): Promise<Site[]> => delayed(get<Site>('sites')),
+  findSiteByShortCode: (shortCode: string): Promise<Site | undefined> => {
+      const site = get<Site>('sites').find(s => s.shortCode === shortCode);
+      return delayed(site);
+  },
+  findSiteByUrl: (hostname: string, pathname: string): Promise<Site | null> => {
+    const sites = get<Site>('sites');
+    // 1. Check by domain
+    const byDomain = sites.find(s => s.domains.includes(hostname));
+    if (byDomain) return delayed(byDomain);
 
-        db.setItem('loggedInUserId', user.id);
-        return getAuthenticatedUserFromUser(user);
-    },
-
-    async logout(): Promise<void> {
-        await delay(100);
-        localStorage.removeItem('fwm_loggedInUserId');
-    },
-
-    async getLoggedInUser(): Promise<AuthenticatedUser> {
-        await delay(100);
-        const userId = db.getItem<string>('loggedInUserId');
-        if (!userId) {
-            throw new Error('Not authenticated');
-        }
-        const users = db.getCollection<User>('users');
-        const user = users.find(u => u.id === userId);
-        if (!user) {
-            throw new Error('User not found');
-        }
-        return getAuthenticatedUserFromUser(user);
-    },
-
-    async listUsers(): Promise<User[]> {
-        await delay(200);
-        return db.getCollection<User>('users');
-    },
-
-    async listSites(): Promise<Site[]> {
-        await delay(100);
-        return db.getCollection<Site>('sites');
-    },
+    // 2. Check by path slug (for public pages)
+    const pathParts = pathname.split('/').filter(Boolean);
+    if (pathParts[0] === 'public' && pathParts.length >= 3 && pathParts[1] === 'conference') {
+        const shortCode = pathParts[2];
+        const byShortCode = sites.find(s => s.shortCode === shortCode);
+        if (byShortCode) return delayed(byShortCode);
+    }
     
-    async listRoles(): Promise<Role[]> {
-        await delay(100);
-        return db.getCollection<Role>('roles');
-    },
+    return delayed(null);
+  },
+  listRoles: (): Promise<Role[]> => delayed(get<Role>('roles')),
+  listRolesBySite: (siteId: string): Promise<Role[]> => {
+    const allRoles = get<Role>('roles');
+    return delayed(allRoles.filter(r => r.siteId === siteId || r.siteId === null));
+  },
+  listPermissions: (): Promise<Permission[]> => delayed(get<Permission>('permissions')),
+  async getRoleWithPermissions(roleId: string): Promise<{ role: Role, permissionIds: string[] }> {
+    const roles = get<Role>('roles');
+    const role = roles.find(r => r.id === roleId);
+    const rolePermissions = JSON.parse(localStorage.getItem('role_permissions') || '{}');
+    if (role) {
+      return delayed({ role, permissionIds: rolePermissions[roleId] || [] });
+    }
+    return delayedError('Role not found');
+  },
+  async createRole(data: { name: string; permissionIds: string[]; siteId: string; userId: string; }): Promise<Role> {
+    const roles = get<Role>('roles');
+    const newRole: Role = { id: uid(), name: data.name, siteId: data.siteId };
+    set('roles', [...roles, newRole]);
+    // ... update role_permissions and audit_log
+    return delayed(newRole);
+  },
+  async updateRole(roleId: string, data: { name: string; permissionIds: string[]; siteId: string; userId: string; }): Promise<Role> {
+    const roles = get<Role>('roles');
+    const roleIndex = roles.findIndex(r => r.id === roleId);
+    if (roleIndex > -1) {
+      roles[roleIndex].name = data.name;
+      set('roles', roles);
+      // ... update role_permissions and audit_log
+      return delayed(roles[roleIndex]);
+    }
+    return delayedError('Role not found');
+  },
+  async deleteRole(roleId: string, siteId: string, userId: string): Promise<void> {
+    const roles = get<Role>('roles');
+    const newRoles = roles.filter(r => r.id !== roleId);
+    set('roles', newRoles);
+    // ... update role_permissions and audit_log
+    return delayed(undefined);
+  },
 
-    async listPermissions(): Promise<Permission[]> {
-        await delay(100);
-        return db.getCollection<Permission>('permissions');
-    },
+  // SITE-SPECIFIC DATA
+  updateSite: (siteId: string, updates: Partial<Site>, meta: { userId: string, userEmail: string, reason: string }): Promise<Site> => {
+      const sites = get<Site>('sites');
+      const siteIndex = sites.findIndex(s => s.id === siteId);
+      if (siteIndex === -1) return delayedError('Site not found');
+      
+      const updatedSite = deepMerge(sites[siteIndex], updates);
+      sites[siteIndex] = updatedSite;
+      set('sites', sites);
 
-    async listAttendeesBySite(siteId: string): Promise<Attendee[]> {
-        await delay(300);
-        const allAttendees = db.getCollection<Attendee>('attendees');
-        return allAttendees.filter(a => a.siteId === siteId);
-    },
+      // Create a version history entry
+      const versions = get<SettingsVersion>('settings_versions');
+      const newVersion: SettingsVersion = {
+          id: uid(),
+          siteId,
+          createdAt: new Date().toISOString(),
+          createdByUserId: meta.userId,
+          createdByUserEmail: meta.userEmail,
+          settingsSnapshot: updatedSite,
+          changeReason: meta.reason,
+      };
+      set('settings_versions', [...versions, newVersion]);
+
+      return delayed(updatedSite);
+  },
+
+  // --- REGISTRATION & ATTENDEE API ---
+  listTicketTypesBySite: (siteId: string): Promise<TicketType[]> => {
+      return delayed(get<TicketType>('ticket_types').filter(tt => tt.siteId === siteId));
+  },
+  
+  listAttendeesBySite: (siteId: string): Promise<Attendee[]> => {
+    const attendees = get<Attendee>('attendees').filter(a => a.siteId === siteId);
+    const registrations = get<Registration>('registrations');
+    const consents = get<any>('consents');
     
-    async listRoomsBySite(siteId: string): Promise<Room[]> {
-        await delay(200);
-        const allRooms = db.getCollection<Room>('rooms');
-        return allRooms.filter(r => r.siteId === siteId);
-    },
-    
-    async listBookingsBySite(siteId: string): Promise<Booking[]> {
-        await delay(300);
-        const allBookings = db.getCollection<Booking>('bookings');
-        return allBookings.filter(b => b.siteId === siteId);
-    },
+    // Attach related data
+    const hydratedAttendees = attendees.map(attendee => ({
+        ...attendee,
+        registrations: registrations.filter(r => r.attendeeId === attendee.id),
+        consents: consents.filter((c: any) => c.attendeeId === attendee.id),
+    }));
 
-    async createBooking(data: Omit<Booking, 'id' | 'createdAt'>): Promise<Booking> {
-        await delay(600);
-        const allBookings = db.getCollection<Booking>('bookings');
+    return delayed(hydratedAttendees);
+  },
 
-        // Overlap check
-        const hasOverlap = allBookings.some(booking =>
-            booking.roomId === data.roomId &&
-            data.checkIn < booking.checkOut &&
-            data.checkOut > booking.checkIn
-        );
-        
-        if (hasOverlap) {
-            throw new Error('This room is already booked for the selected dates.');
-        }
+  listRegistrationsBySite: (siteId: string): Promise<Registration[]> => {
+      return delayed(get<Registration>('registrations').filter(r => r.siteId === siteId));
+  },
+  
+  validateDiscountCode: (siteId: string, code: string, ticketTypeId: string): Promise<{ valid: boolean; discountValue: number; discountType: 'PERCENT' | 'FIXED' }> => {
+      const discount = get<DiscountCode>('discount_codes').find(dc => dc.siteId === siteId && dc.code.toUpperCase() === code.toUpperCase());
+      if (!discount || discount.usedCount >= discount.usageLimit) {
+          return delayedError('Invalid or expired discount code.');
+      }
+      if (discount.appliesToTicketTypeId && discount.appliesToTicketTypeId !== ticketTypeId) {
+          return delayedError(`This code is not valid for the selected ticket type.`);
+      }
+      return delayed({ valid: true, discountValue: discount.value, discountType: discount.type });
+  },
 
-        const newBooking: Booking = {
-            ...data,
-            id: uuid(),
-            createdAt: new Date(),
+  createRegistration: (data: any): Promise<Registration> => {
+    // This is a simplified mock. A real implementation would be a transaction.
+    const allAttendees = get<Attendee>('attendees');
+    let attendee = allAttendees.find(a => a.email === data.attendee.email && a.siteId === data.siteId);
+
+    if (!attendee) {
+        attendee = {
+            id: uid(),
+            siteId: data.siteId,
+            ...data.attendee,
+            registrations: [],
+            consents: []
         };
+        set('attendees', [...allAttendees, attendee]);
+    }
+    
+    const newReg: Registration = {
+        id: uid(),
+        siteId: data.siteId,
+        attendeeId: attendee.id,
+        ticketTypeId: data.ticketTypeId,
+        status: data.totalPrice > 0 ? RegistrationStatus.PENDING_PAYMENT : RegistrationStatus.PAID,
+        createdAt: new Date().toISOString(),
+        pricePaid: 0,
+        qrCodeValue: `FWM24-${uid()}`,
+    };
+    const registrations = get<Registration>('registrations');
+    set('registrations', [...registrations, newReg]);
 
-        allBookings.push(newBooking);
-        db.setItem('bookings', allBookings);
-        return newBooking;
-    },
+    return delayed(newReg);
+  },
+
+
+  // HOTEL
+  listBookingsBySite: (siteId: string): Promise<Booking[]> => delayed(get<Booking>('bookings').filter(b => b.siteId === siteId)),
+  listRoomsBySite: (siteId: string): Promise<Room[]> => delayed(get<Room>('rooms').filter(r => r.siteId === siteId)),
+  createBooking: (bookingData: Omit<Booking, 'id'>): Promise<Booking> => {
+    const bookings = get<Booking>('bookings');
+    const newBooking = { ...bookingData, id: uid(), checkIn: bookingData.checkIn.toString(), checkOut: bookingData.checkOut.toString() };
+    set('bookings', [...bookings, newBooking]);
+    return delayed(newBooking);
+  },
+
+  // --- ADMIN & LOGGING ---
+  listAuditLogsBySite: (siteId: string): Promise<AuditLog[]> => delayed(get<AuditLog>('audit_logs').filter(log => log.siteId === siteId)),
+  listDataRequestLogsBySite: (siteId: string): Promise<DataRequestLog[]> => delayed(get<DataRequestLog>('data_request_logs').filter(log => log.siteId === siteId)),
+  createDataRequest: (requestData: Omit<DataRequestLog, 'id' | 'status' | 'requestedAt' | 'downloadUrl'>): Promise<DataRequestLog> => {
+    const logs = get<DataRequestLog>('data_request_logs');
+    const newLog: DataRequestLog = {
+      ...requestData,
+      id: uid(),
+      status: 'PENDING',
+      requestedAt: new Date().toISOString(),
+      downloadUrl: null,
+    };
+    set('data_request_logs', [...logs, newLog]);
+
+    // Simulate async processing
+    setTimeout(() => {
+        const currentLogs = get<DataRequestLog>('data_request_logs');
+        const logIndex = currentLogs.findIndex(l => l.id === newLog.id);
+        if (logIndex > -1) {
+            currentLogs[logIndex].status = 'COMPLETED';
+            if (currentLogs[logIndex].type === 'EXPORT') {
+                currentLogs[logIndex].downloadUrl = '#'; // Mock download link
+            }
+            set('data_request_logs', currentLogs);
+        }
+    }, 3000);
+
+    return delayed(newLog);
+  },
+  getSystemHealth: (): Promise<SystemHealth> => {
+    // Mock health status. In a real app, this would come from a dedicated health check endpoint.
+    const health: SystemHealth = {
+        database: SystemServiceStatus.OPERATIONAL,
+        queues: SystemServiceStatus.OPERATIONAL,
+        emailProvider: SystemServiceStatus.DEGRADED, // Example of a degraded service
+        smsProvider: SystemServiceStatus.OPERATIONAL,
+        storage: SystemServiceStatus.OUTAGE, // Example of an outage
+    };
+    return delayed(health);
+  },
+  listSettingsVersionsBySite: (siteId: string): Promise<SettingsVersion[]> => {
+    const versions = get<SettingsVersion>('settings_versions').filter(v => v.siteId === siteId);
+    return delayed(versions.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()));
+  },
+  getSettingsVersion: (versionId: string): Promise<SettingsVersion> => {
+    const version = get<SettingsVersion>('settings_versions').find(v => v.id === versionId);
+    return version ? delayed(version) : delayedError('Version not found');
+  },
 };

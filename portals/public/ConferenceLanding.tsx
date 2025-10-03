@@ -1,56 +1,72 @@
-
-import React, { useState } from 'react';
-import { useParams } from 'react-router-dom';
+import React, { useState, useEffect } from 'react';
+import { useParams, Link } from 'react-router-dom';
 import Button from '../../components/ui/Button.tsx';
+import { apiService } from '../../src/services/apiService.ts';
+import { Site } from '../../types.ts';
+import LoadingSpinner from '../../components/ui/LoadingSpinner.tsx';
 
 const ConferenceLanding: React.FC = () => {
-    const { siteId } = useParams<{ siteId: string }>();
-    const [formData, setFormData] = useState({ firstName: '', lastName: '', email: '' });
-    const [isSubmitted, setIsSubmitted] = useState(false);
+    const { shortCode } = useParams<{ shortCode: string }>();
+    const [site, setSite] = useState<Site | null>(null);
+    const [loading, setLoading] = useState(true);
 
-    const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-        setFormData({ ...formData, [e.target.name]: e.target.value });
-    };
+    useEffect(() => {
+        if (shortCode) {
+            setLoading(true);
+            apiService.findSiteByShortCode(shortCode)
+                .then(foundSite => {
+                    if (foundSite) {
+                        setSite(foundSite);
+                    } else {
+                        console.error("Site not found for shortCode:", shortCode);
+                    }
+                })
+                .finally(() => setLoading(false));
+        }
+    }, [shortCode]);
+    
+    const primaryColor = site?.branding.primaryColor || '#4338CA'; // indigo-700
+    const accentColor = site?.branding.accentColor || '#10B981';
 
-    const handleSubmit = (e: React.FormEvent) => {
-        e.preventDefault();
-        // In a real app, this would call apiService.createAttendee or similar
-        console.log('Registering for conference site:', siteId, formData);
-        setIsSubmitted(true);
-    };
+    if (loading) {
+        return <div className="min-h-screen flex items-center justify-center"><LoadingSpinner size="lg"/></div>;
+    }
+
+    if (!site) {
+        return (
+            <div className="min-h-screen flex flex-col items-center justify-center text-center p-4">
+                <h1 className="text-4xl font-bold">Conference Not Found</h1>
+                <p className="mt-4 text-gray-600 dark:text-gray-400">The conference you are looking for does not exist or has been moved.</p>
+            </div>
+        );
+    }
+    
+    const isRegistrationEnabled = site.publicSettings?.registrationEnabled !== false;
 
     return (
-        <div className="min-h-screen bg-indigo-700 text-white flex flex-col items-center justify-center p-4">
+        <div className="min-h-screen text-white flex flex-col items-center justify-center p-4" style={{ backgroundColor: primaryColor }}>
             <div className="text-center">
-                <h1 className="text-5xl font-extrabold mb-4">FWM Annual Conference 2024</h1>
-                <p className="text-xl mb-8 text-indigo-200">Join us for an inspiring week of faith, fellowship, and growth.</p>
+                {site.branding.logoUrl && <img src={site.branding.logoUrl} alt={`${site.name} Logo`} className="mx-auto h-16 mb-6 object-contain"/>}
+                <h1 className="text-5xl font-extrabold mb-4">{site.name}</h1>
+                <p className="text-xl mb-8 opacity-80">Join us for an inspiring week of faith, fellowship, and growth.</p>
             </div>
 
-            <div className="w-full max-w-lg bg-white dark:bg-gray-800 text-gray-800 dark:text-white p-8 rounded-xl shadow-2xl">
-                {isSubmitted ? (
+            <div className="w-full max-w-lg bg-white/10 backdrop-blur-lg p-8 rounded-xl shadow-2xl">
+                {isRegistrationEnabled ? (
                     <div className="text-center">
-                        <h2 className="text-2xl font-bold text-green-500">Thank You for Registering!</h2>
-                        <p className="mt-4">We've received your information and will be in touch with more details soon.</p>
+                        <h2 className="text-2xl font-bold">Registration is Open!</h2>
+                        <p className="mt-2 mb-6">Secure your spot today.</p>
+                        <Link to={`/public/conference/${shortCode}/register`}>
+                             <Button size="lg" className="w-full !text-lg" style={{ backgroundColor: accentColor }}>
+                                Register Now
+                            </Button>
+                        </Link>
                     </div>
                 ) : (
-                    <>
-                        <h2 className="text-2xl font-bold text-center mb-6">Register Now</h2>
-                        <form onSubmit={handleSubmit} className="space-y-4">
-                            <div>
-                                <label htmlFor="firstName" className="block text-sm font-medium text-gray-700 dark:text-gray-300">First Name</label>
-                                <input type="text" name="firstName" id="firstName" onChange={handleChange} required className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm dark:bg-gray-700 dark:border-gray-600 dark:text-white" />
-                            </div>
-                            <div>
-                                <label htmlFor="lastName" className="block text-sm font-medium text-gray-700 dark:text-gray-300">Last Name</label>
-                                <input type="text" name="lastName" id="lastName" onChange={handleChange} required className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm dark:bg-gray-700 dark:border-gray-600 dark:text-white" />
-                            </div>
-                            <div>
-                                <label htmlFor="email" className="block text-sm font-medium text-gray-700 dark:text-gray-300">Email Address</label>
-                                <input type="email" name="email" id="email" onChange={handleChange} required className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm dark:bg-gray-700 dark:border-gray-600 dark:text-white" />
-                            </div>
-                            <Button type="submit" className="w-full !mt-6">Register</Button>
-                        </form>
-                    </>
+                    <div className="text-center">
+                        <h2 className="text-2xl font-bold">Registration is Currently Closed</h2>
+                        <p className="mt-4 text-white/80">Please check back later for updates.</p>
+                    </div>
                 )}
             </div>
         </div>
